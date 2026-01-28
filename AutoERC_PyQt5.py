@@ -12,6 +12,8 @@ from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont, QPainterPath, QDr
 # --- Global Configuration ---
 CYCLE_TIME = 0.1
 DEBUG_MODE = False
+# Track the steering state globally
+current_steering_angle = SERVO_STRAIGHT
 
 # --- Car Control Constants ---
 FORWARD_SPEED = 100
@@ -70,76 +72,58 @@ def send_car_command(speed, steering_angle, stop_override=0):
 
 def block_move_forward(duration_s=1, log_callback=None):
     if log_callback:
-        log_callback(f"--> Command: Move Forward for {duration_s}s (Angle: {current_steering_angle})")
-    # Use the current_steering_angle instead of SERVO_STRAIGHT
+        log_callback(f"--> Command: Move Forward at angle {current_steering_angle} for {duration_s}s")
+    # Use global steering angle so it keeps the turn set by the previous block
     send_car_command(FORWARD_SPEED, current_steering_angle)
     time.sleep(duration_s)
     send_car_command(0, current_steering_angle, STOP_SIGNAL)
     
 def block_move_backward(duration_s=1, log_callback=None):
     if log_callback:
-        log_callback(f"--> Command: Move Backward for {duration_s}s (Angle: {current_steering_angle})")
-    # Use the current_steering_angle instead of SERVO_STRAIGHT
+        log_callback(f"--> Command: Move Backward at angle {current_steering_angle} for {duration_s}s")
+    # Use global steering angle
     send_car_command(-BACKWARD_SPEED, current_steering_angle)
     time.sleep(duration_s)
     send_car_command(0, current_steering_angle, STOP_SIGNAL)
 
-# Add this function to your block functions section
-def block_center_wheels(log_callback=None):
-    global current_steering_angle
-    if log_callback:
-        log_callback("--> Command: Center Wheels")
-    current_steering_angle = SERVO_STRAIGHT
-    send_car_command(0, current_steering_angle)
-    time.sleep(0.2)
-
-# Then update the list inside init_ui:
-self.block_definitions = [
-    ("Moving Forward", block_move_forward, 1, "Motion", "duration"),
-    ("Moving Backward", block_move_backward, 1, "Motion", "duration"),
-    ("Relative Position", block_turn_angle, 0, "Motion", "angle"),
-    ("Center Wheels", block_center_wheels, None, "Control", None), # New Block
-    ("Wait", block_wait, 1, "Control", "duration"),
-    ("Stop", block_stop, None, "Control", None),
-]
-
 def block_turn_angle(angle_degrees=0, log_callback=None):
-    """Updates the wheel direction without moving the car forward."""
+    """Updates the wheel direction. Car stays still. Angle persists until changed."""
     global current_steering_angle
     
     if log_callback:
-        log_callback(f"--> Command: Setting Steering to {angle_degrees} degrees")
+        log_callback(f"--> Command: Setting Steering Angle to {angle_degrees} degrees")
     
-    # Calculate the new angle
+    # Calculate mapping from degrees to servo PWM
     if angle_degrees > 0:
-        new_angle = SERVO_STRAIGHT + int((angle_degrees / 90.0) * (SERVO_RIGHT_MAX - SERVO_STRAIGHT))
-        new_angle = min(new_angle, SERVO_RIGHT_MAX)
+        target_servo = SERVO_STRAIGHT + int((angle_degrees / 90.0) * (SERVO_RIGHT_MAX - SERVO_STRAIGHT))
+        target_servo = min(target_servo, SERVO_RIGHT_MAX)
     elif angle_degrees < 0:
-        new_angle = SERVO_STRAIGHT + int((angle_degrees / 90.0) * (SERVO_STRAIGHT - SERVO_LEFT_MAX))
-        new_angle = max(new_angle, SERVO_LEFT_MAX)
+        target_servo = SERVO_STRAIGHT + int((angle_degrees / 90.0) * (SERVO_STRAIGHT - SERVO_LEFT_MAX))
+        target_servo = max(target_servo, SERVO_LEFT_MAX)
     else:
-        new_angle = SERVO_STRAIGHT
+        target_servo = SERVO_STRAIGHT
     
     # Update the global state
-    current_steering_angle = new_angle
+    current_steering_angle = target_servo
     
-    # Send command with 0 speed so the car doesn't move forward
+    # Send command with 0 speed (so car doesn't move) and the new angle
     send_car_command(0, current_steering_angle)
     
-    # Small delay to allow the servo motor physical time to move
-    time.sleep(0.3) 
-    # Notice: No second send_car_command here, so the wheels stay turned!
+    # Give the physical servo a moment to reach the position
+    time.sleep(0.3)
+    # Note: We do NOT send a second command to reset here. 
+    # The wheels will stay at 'current_steering_angle' until another block changes it.
 
 def block_stop(log_callback=None):
     if log_callback:
         log_callback("--> Command: STOP")
-    # Stop the motor but keep the wheels at the current angle
+    # Stop motors but maintain the current wheel angle
     send_car_command(0, current_steering_angle, STOP_SIGNAL)
 
 def block_wait(duration_s=1, log_callback=None):
     if log_callback:
         log_callback(f"--> Command: Wait for {duration_s} seconds")
-    send_car_command(0, SERVO_STRAIGHT, STOP_SIGNAL)
+    send_car_command(0, current_steering_angle, STOP_SIGNAL)
     time.sleep(duration_s)
 
 
@@ -1052,4 +1036,5 @@ if __name__ == '__main__':
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
+
 
