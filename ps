@@ -1,0 +1,470 @@
+import pygame
+import socket
+import time
+import sys
+# Do not import logitech_steering_wheel here; import conditionally later
+from tkinter import Tk, Label, Text, END, Frame, Button, Scrollbar
+from tkinter import messagebox, ttk  # Use ttk for themed widgets
+import threading  # For non-blocking updates
+
+CYCLE_TIME = 0.1  # Main loop frequency
+
+DEBUG_MODE = False  # Set to True for debug logging; can be changed manually
+
+# Initialize root window early but hidden
+root = Tk()
+root.withdraw()  # Hide initially
+root.title("Car Controller - Game Dashboard") 
+root.geometry("900x700")  # Larger window for dashboard feel
+root.configure(bg='#0a0a0a')  # Dark theme for game-like feel
+root.resizable(True, True)
+
+# Style configuration for ttk
+style = ttk.Style()
+style.theme_use('clam')  # Modern theme
+style.configure('Game.TLabel', background='#0a0a0a', foreground='#00ff00', font=('Courier New', 12, 'bold'))
+style.configure('Title.TLabel', background='#0a0a0a', foreground='#ffffff', font=('Arial', 18, 'bold'))
+
+# Initialize Pygame (but defer joystick init until after GUI for early logging)
+pygame.init()
+pygame.joystick.init()
+
+# Now show the window early to allow GUI creation
+root.deiconify()
+
+# Create main dashboard frame
+dashboard_frame = Frame(root, bg='#0a0a0a')
+dashboard_frame.pack(fill='both', expand=True, padx=20, pady=20)
+
+# Title
+title_label = ttk.Label(dashboard_frame, text="🚗 Car Control Dashboard", style='Title.TLabel')
+title_label.pack(pady=(0, 20))
+
+# Status frame for key metrics (game-like gauges simulation)
+status_frame = Frame(dashboard_frame, bg='#1a1a1a', relief='raised', bd=2)
+status_frame.pack(fill='x', pady=(0, 10))
+
+# Sub-frames for left and right sides
+left_metrics = Frame(status_frame, bg='#1a1a1a')
+left_metrics.pack(side='left', padx=20, pady=10, fill='y')
+
+right_metrics = Frame(status_frame, bg='#1a1a1a')
+right_metrics.pack(side='right', padx=20, pady=10, fill='y')
+
+# Steering and Direction
+steering_label = ttk.Label(left_metrics, text="Steering: 0.000", style='Game.TLabel')
+steering_label.pack(anchor='w')
+
+direction_label = ttk.Label(left_metrics, text="Direction: Straight", style='Game.TLabel', foreground='#ffff00')
+direction_label.pack(anchor='w')
+
+# Speeds
+lspeed_label = ttk.Label(left_metrics, text="Left Speed: 0", style='Game.TLabel', foreground='#ff0000')
+lspeed_label.pack(anchor='w')
+
+rspeed_label = ttk.Label(left_metrics, text="Right Speed: 0", style='Game.TLabel', foreground='#00ff00')
+rspeed_label.pack(anchor='w')
+
+# Servo
+servo_label = ttk.Label(left_metrics, text="Servo Angle: 90°", style='Game.TLabel')
+servo_label.pack(anchor='w')
+
+# Controls
+mode_label = ttk.Label(right_metrics, text="Mode: Forward", style='Game.TLabel', foreground='#00ffff')
+mode_label.pack(anchor='w')
+
+accel_label = ttk.Label(right_metrics, text="Accelerator: Released", style='Game.TLabel', foreground='#00ff00')
+accel_label.pack(anchor='w')
+
+brake_label = ttk.Label(right_metrics, text="Brake: Released", style='Game.TLabel', foreground='#ff0000')
+brake_label.pack(anchor='w')
+
+stop_label = ttk.Label(right_metrics, text="Stop: Released", style='Game.TLabel', foreground='#ffff00')
+stop_label.pack(anchor='w')
+
+# Log area with scrollbar
+log_frame = Frame(dashboard_frame, bg='#0a0a0a')
+log_frame.pack(fill='both', expand=True, pady=(10, 0))
+
+log_label = Label(log_frame, text="Console Log", font=('Arial', 12, 'bold'), fg='#ffffff', bg='#0a0a0a')
+log_label.pack(anchor='w')
+
+log_text = Text(log_frame, height=12, width=100, bg='#000000', fg='#00ff00', font=('Courier New', 9), wrap='word')
+log_text.pack(fill='both', expand=True, pady=(5, 0), side='left')
+
+# Scrollbar for log
+scrollbar = Scrollbar(log_frame, orient='vertical', command=log_text.yview)
+scrollbar.pack(side='right', fill='y')
+log_text.config(yscrollcommand=scrollbar.set)
+
+# Control buttons frame (created without commands initially)
+controls_frame = Frame(dashboard_frame, bg='#0a0a0a')
+controls_frame.pack(fill='x', pady=(10, 0))
+
+debug_btn = Button(controls_frame, text="Toggle Debug Mode", bg='#333333', fg='#ffffff', font=('Arial', 10))
+debug_btn.pack(side='left', padx=10)
+
+quit_btn = Button(controls_frame, text="Quit Game", bg='#ff0000', fg='#ffffff', font=('Arial', 10, 'bold'))
+quit_btn.pack(side='right', padx=10)
+
+def log(msg):
+    log_text.insert(END, msg + '\n')
+    log_text.see(END)
+    root.update_idletasks()  # Non-blocking update
+
+# Now handle joystick initialization after log_text is created
+joystick = None
+joystick_name = None
+if pygame.joystick.get_count() > 0:
+    joystick = pygame.joystick.Joystick(0)
+    joystick.init()
+    joystick_name = joystick.get_name()
+
+if joystick:
+    log(f"Controller detected: {joystick_name}")
+else:
+    log("Simulation mode active. Connect a joystick to enable controls.")
+
+# Detect controller type
+def is_gamepad(joystick_name):
+    """Detect if the controller is a gamepad (PS4, PS5, Xbox)"""
+    if joystick_name is None:
+        return False
+    name_lower = joystick_name.lower()
+    return any(keyword in name_lower for keyword in ['playstation', 'ps4', 'ps5', 'dualshock', 'dualsense', 'xbox', 'xinput'])
+
+CONTROLLER_TYPE = "gamepad" if is_gamepad(joystick_name) else "steering_wheel"
+if joystick:
+    log(f"Controller type: {CONTROLLER_TYPE}")
+
+log("Dashboard initialized. Ready to race! 🏁")
+
+# Conditionally import and initialize force feedback
+logitech_steering_wheel = None
+logitech_steering_wheel_instance = None
+try:
+    import logitech_steering_wheel
+    if logitech_steering_wheel.initialize():
+        if logitech_steering_wheel.is_connected(0):
+            log("Force feedback initialized")
+            logitech_steering_wheel.set_operating_range(0, 360)
+            log("Steering wheel rotation set to 360 degrees")
+            logitech_steering_wheel_instance = logitech_steering_wheel
+        else:
+            log("G27 not connected for force feedback")
+    else:
+        log("Force feedback initialization failed")
+except ImportError as e:
+    log(f"Could not import logitech_steering_wheel: {e}. Force feedback disabled.")
+except Exception as e:
+    log(f"Force feedback error: {e}. Force feedback disabled.")
+
+# UDP settings
+UDP_IP = "192.168.4.1"  # ESP8266 AP IP
+UDP_PORT = 4210
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+# Force feedback settings
+SPRING_FORCE_COEFFICIENT = 100
+SPRING_FORCE_SATURATION = 100
+
+# State variables
+last_left_speed = 0
+last_right_speed = 0
+last_stop_state = 0
+last_servo_angle = 90
+accel_pressed = False  # Track if accelerator has been pressed
+brake_pressed = False  # Track if brake has been pressed
+
+def get_gamepad_inputs(joystick):
+    """Get inputs from gamepad controller (PS4, PS5, Xbox)"""
+    try:
+        # Left joystick X-axis for steering
+        steering_axis = joystick.get_axis(0)  # -1 (left) to 1 (right)
+        
+        # Get number of axes to determine controller type
+        num_axes = joystick.get_numaxes()
+        
+        # R2 and L2 triggers - User confirmed mapping:
+        # L2 = axis 4 (values: -1 released, 1 pressed)
+        # R2 = axis 5 (values: -1 released, 1 pressed)
+        l2_axis = 0
+        r2_axis = 0
+        
+        # Read L2 from axis 4
+        if num_axes > 4:
+            try:
+                l2_axis = joystick.get_axis(4)
+            except:
+                pass
+        
+        # Read R2 from axis 5
+        if num_axes > 5:
+            try:
+                r2_axis = joystick.get_axis(5)
+            except:
+                pass
+        
+        # Debug: Log all axes if debug mode is on
+        if DEBUG_MODE:
+            log(f"L2 (axis 4): {l2_axis:.3f}, R2 (axis 5): {r2_axis:.3f}")
+            all_axes = []
+            for i in range(min(num_axes, 6)):
+                try:
+                    val = joystick.get_axis(i)
+                    all_axes.append(f"Axis{i}={val:.3f}")
+                except:
+                    pass
+            log(f"All axes: {', '.join(all_axes)}")
+        
+        # Normalize trigger values: -1 (released) -> 0, 1 (pressed) -> 1
+        # Formula: (axis_value + 1) / 2
+        # -1 -> (-1 + 1) / 2 = 0
+        # 1 -> (1 + 1) / 2 = 1
+        l2_value = (l2_axis + 1) / 2
+        l2_value = max(0.0, min(1.0, l2_value))
+        
+        r2_value = (r2_axis + 1) / 2
+        r2_value = max(0.0, min(1.0, r2_value))
+        
+        # Buttons: Try multiple mappings for L1/R1
+        # PS4/PS5: L1 = button 4, R1 = button 5
+        # Xbox: LB = button 4, RB = button 5
+        # Some controllers: L1 = button 6, R1 = button 7
+        num_buttons = joystick.get_numbuttons()
+        l1_button = False
+        r1_button = False
+        
+        # Try common button indices for L1 and R1 (check most common first)
+        # Priority order based on controller type
+        l1_candidates = [4, 6, 8, 10]  # Common L1/LB button indices
+        r1_candidates = [5, 7, 9, 11]  # Common R1/RB button indices
+        
+        # Check for L1 button - try all candidates, use first match
+        for btn_idx in l1_candidates:
+            if num_buttons > btn_idx:
+                try:
+                    button_state = joystick.get_button(btn_idx)
+                    if button_state:
+                        l1_button = True
+                        break
+                except:
+                    pass
+        
+        # Check for R1 button - try all candidates, use first match
+        for btn_idx in r1_candidates:
+            if num_buttons > btn_idx:
+                try:
+                    button_state = joystick.get_button(btn_idx)
+                    if button_state:
+                        r1_button = True
+                        break
+                except:
+                    pass
+        
+        # Stop button (usually X/Square or A button)
+        stop_button = False
+        if num_buttons > 0:
+            try:
+                stop_button = joystick.get_button(0) or (joystick.get_button(1) if num_buttons > 1 else False)
+            except:
+                pass
+        
+        return steering_axis, l2_value, r2_value, l1_button, r1_button, stop_button
+    except Exception as e:
+        if DEBUG_MODE:
+            log(f"Error reading gamepad: {e}")
+        return 0, 0, 0, False, False, False
+
+def get_steering_wheel_inputs(joystick):
+    """Get inputs from steering wheel (G27)"""
+    try:
+        wheel_axis = joystick.get_axis(0)  # Steering: -1 (left) to 1 (right)
+        accel_axis = joystick.get_axis(1)  # Accelerator
+        brake_axis = joystick.get_axis(2)  # Brake
+        stop_button = joystick.get_button(0)  # Stop button
+        return wheel_axis, accel_axis, brake_axis, stop_button
+    except pygame.error:
+        log("Invalid axis. Check joystick configuration.")
+        return 0, 1.0, 1.0, False
+
+def toggle_debug():
+    global DEBUG_MODE
+    DEBUG_MODE = not DEBUG_MODE
+    log(f"Debug mode: {'Enabled' if DEBUG_MODE else 'Disabled'}")
+
+def update_loop():
+    global last_left_speed, last_right_speed, last_stop_state, last_servo_angle, accel_pressed, brake_pressed
+    try:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                on_close()
+
+        # Initialize variables for UI display
+        l2_value = 0.0
+        r2_value = 0.0
+        accel_value = 1.0
+        brake_value = 1.0
+        stop_button = False
+        
+        # Read inputs, handling no joystick case (simulation mode)
+        if joystick is None:
+            wheel_axis = 0.0
+            accel_axis = 1.0  # Neutral/released
+            brake_axis = 1.0  # Neutral/released
+            left_speed = 0
+            right_speed = 0
+            stop_state = 0
+            # In sim mode, don't update pressed flags to keep them False initially
+        elif CONTROLLER_TYPE == "gamepad":
+            # Read gamepad inputs
+            steering_axis, l2_value, r2_value, _, _, _ = get_gamepad_inputs(joystick)
+            
+            # Update pressed flags
+            if r2_value > 0.05:  # Threshold to detect press
+                accel_pressed = True
+            if l2_value > 0.05:
+                brake_pressed = True
+            
+            # Debug: Log raw axis values
+            if DEBUG_MODE:
+                debug_msg = f"Raw inputs: steering={steering_axis:.3f}, L2={l2_value:.3f}, R2={r2_value:.3f}"
+                log(debug_msg)
+            
+            # Simple logic: R2 = forward speed, L2 = backward speed
+            # If both released (both <= 0.05), car stops
+            # Forward speed: directly from R2 value (0-255)
+            right_speed = int(r2_value * 255) if r2_value > 0.05 else 0
+            
+            # Backward speed: directly from L2 value (0-255)
+            left_speed = int(l2_value * 255) if l2_value > 0.05 else 0
+            
+            # Stop state: 1 if both triggers are released, 0 otherwise
+            stop_state = 1 if (r2_value <= 0.05 and l2_value <= 0.05) else 0
+            
+            # Update display values
+            accel_value = r2_value
+            brake_value = l2_value
+            
+            # Process steering from left joystick
+            wheel_axis = steering_axis
+            
+        else:  # steering_wheel
+            wheel_axis, accel_axis, brake_axis, stop_button = get_steering_wheel_inputs(joystick)
+            
+            # Update pressed flags (only if joystick present)
+            if accel_axis != 0:
+                accel_pressed = True
+            if brake_axis != 0:
+                brake_pressed = True
+            
+            # Process accelerator for forward speed
+            accel_value = accel_axis if accel_pressed else 1.0  # Treat as released until pressed
+            # Process brake for backward speed
+            brake_value = brake_axis if brake_pressed else 1.0  # Treat as released until pressed
+            
+            # Debug: Log raw axis values and pressed flags
+            if DEBUG_MODE:
+                debug_msg = f"Raw inputs: wheel={wheel_axis:.3f}, accel={accel_axis:.3f}, brake={brake_axis:.3f}, "
+                debug_msg += f"stop={stop_button}, accel_pressed={accel_pressed}, brake_pressed={brake_pressed}"
+                log(debug_msg)
+            
+            # Process accelerator and brake
+            if stop_button:
+                left_speed = 0
+                right_speed = 0
+                stop_state = 1
+            else:
+                right_speed = int((1.0 - accel_value) * 127.5) if accel_value < 1.0 else 0  # Forward: 0 to 255
+                left_speed = int((1.0 - brake_value) * 127.5) if brake_value < 1.0 else 0  # Backward: 0 to 255
+                stop_state = 0
+
+        # Process steering
+        servo_angle = int(90 * (1 + wheel_axis))  # -1 (left) → 0°, 1 (right) → 180°
+        servo_angle = max(50, min(180, servo_angle))
+
+        # Constrain speeds
+        left_speed = max(0, min(190, left_speed))  # Backward
+        right_speed = max(0, min(190, right_speed))  # Forward
+
+        # Determine direction for display
+        direction = "Left" if wheel_axis < 0 else \
+                    "Right" if wheel_axis > 0 else "Straight"
+
+        # Apply force feedback (only if instance exists and not in sim mode)
+        if logitech_steering_wheel_instance and joystick is not None and not stop_state:
+            wheel_deviation = abs(wheel_axis) * 100
+            logitech_steering_wheel_instance.play_spring_force(0, 0, SPRING_FORCE_SATURATION, int(wheel_deviation))
+            speed = max(left_speed, right_speed)
+            if speed > 0:
+                logitech_steering_wheel_instance.play_constant_force(0, int(speed * 0.2))
+        elif logitech_steering_wheel_instance and joystick is not None:
+            logitech_steering_wheel_instance.stop_spring_force(0)
+            logitech_steering_wheel_instance.stop_constant_force(0)
+
+        # Update UI labels
+        steering_label.config(text=f"Steering: {wheel_axis:.3f}")
+        direction_label.config(text=f"Direction: {direction}")
+        lspeed_label.config(text=f"Left Speed: {left_speed}")
+        rspeed_label.config(text=f"Right Speed: {right_speed}")
+        servo_label.config(text=f"Servo Angle: {servo_angle}°")
+        
+        if CONTROLLER_TYPE == "gamepad" and joystick is not None:
+            # Gamepad-specific labels
+            mode_label.config(text="Mode: Gamepad (R2=Forward, L2=Backward)")
+            accel_label.config(text=f"R2 (Forward): {r2_value:.2f}")
+            brake_label.config(text=f"L2 (Backward): {l2_value:.2f}")
+            stop_label.config(text=f"Status: {'STOPPED' if stop_state == 1 else 'MOVING'}")
+        else:
+            # Steering wheel labels
+            mode_label.config(text="Mode: Steering Wheel")
+            accel_label.config(text=f"Accelerator: {'Pressed' if accel_value < 1.0 else 'Released'}")
+            brake_label.config(text=f"Brake: {'Pressed' if brake_value < 1.0 else 'Released'}")
+            stop_label.config(text=f"Stop: {'Pressed' if stop_button else 'Released'}")
+
+        # Send command if state changes (even in sim mode, sends neutral commands)
+        if (left_speed != last_left_speed or
+            right_speed != last_right_speed or
+            stop_state != last_stop_state or
+            servo_angle != last_servo_angle):
+            command = f"L:{left_speed},R:{right_speed},B:{stop_state},S:{servo_angle}\n"
+            sock.sendto(command.encode(), (UDP_IP, UDP_PORT))
+            if DEBUG_MODE: 
+                log(f"Sent: {command.strip()}")   
+            time.sleep(0.01)  # Small delay to ensure ESP8266 processes packet
+
+        # Update states
+        last_left_speed = left_speed
+        last_right_speed = right_speed
+        last_stop_state = stop_state
+        last_servo_angle = servo_angle
+
+        # Schedule next update
+        root.after(int(CYCLE_TIME * 1000), update_loop)
+
+    except Exception as e:
+        log(f"Error: {e}")
+        # Don't call on_close here to avoid recursion; just log
+
+def on_close():
+    global logitech_steering_wheel_instance
+    log("Closing application")
+    if logitech_steering_wheel_instance:
+        logitech_steering_wheel_instance.stop_spring_force(0)
+        logitech_steering_wheel_instance.stop_constant_force(0)
+        logitech_steering_wheel_instance.shutdown()
+    sock.close()
+    pygame.quit()
+    root.destroy()
+    sys.exit()
+
+# Now set button commands and protocol after functions are defined
+debug_btn.config(command=lambda: toggle_debug())
+quit_btn.config(command=on_close)
+root.protocol("WM_DELETE_WINDOW", on_close)
+
+# Start the update loop in the main thread
+update_loop()
+
+# Start Tkinter main loop
+root.mainloop()
