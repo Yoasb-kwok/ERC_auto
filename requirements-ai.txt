@@ -1,0 +1,9 @@
+# PC controller and Level 1 AI extras.
+# The block UI needs PyQt5. OpenCV is optional: without it, Vision AI stays
+# in placeholder / simulate-label mode. Voice capture is still a stub.
+# Object detection (ONNX, YOLO weights, Roboflow) is optional and listed in
+# requirements-detect.txt. Do not add those packages here; import erc must
+# work without them.
+PyQt5>=5.15
+numpy>=1.23
+opencv-python-headless>=4.8
