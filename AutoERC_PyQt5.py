@@ -1,3 +1,4 @@
+import os
 import socket
 import sys
 import threading
@@ -5,15 +6,18 @@ import time
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QTextEdit, QScrollArea, QFrame, QLineEdit,
                              QMessageBox, QGraphicsView, QGraphicsScene, QGraphicsItem, QGraphicsRectItem,
-                             QSplitter)
+                             QSplitter, QCheckBox, QComboBox)
 from PyQt5.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal, QObject, QMimeData
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont, QPainterPath, QDrag
+
+from ai.command_gateway import CommandGateway, stall_timeout_from_env
+from ai.vision_l1 import VisionLevel1, camera_index_from_env
+from ai.voice_l1 import VoiceLevel1
+from ai.wire import format_car_command
 
 # --- Global Configuration ---
 CYCLE_TIME = 0.1
 DEBUG_MODE = False
-# Track the steering state globally
-current_steering_angle = SERVO_STRAIGHT
 
 # --- Car Control Constants ---
 FORWARD_SPEED = 100
@@ -26,6 +30,12 @@ SERVO_LEFT_MAX = 50
 SERVO_RIGHT_MAX = 130
 
 STOP_SIGNAL = 1
+
+# Track the steering state globally. Must follow SERVO_STRAIGHT.
+current_steering_angle = SERVO_STRAIGHT
+
+# ERC_LOG_ONLY=1 (or the UI dry-run box) prints L/R/B/S and does not transmit.
+LOG_ONLY = os.environ.get("ERC_LOG_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}
 
 # --- UDP Communication Settings ---
 UDP_IP = "192.168.4.1"
@@ -40,35 +50,37 @@ except socket.error as e:
     sys.exit(1)
 
 # --- Block Functions ---
-def send_car_command(speed, steering_angle, stop_override=0):
-    """Sends a single UDP command to the ERC car."""
-    actual_left_speed = 0
-    actual_right_speed = 0
-    actual_stop_state = stop_override
+_udp_lock = threading.Lock()
 
-    if speed > 0:
-        actual_right_speed = speed
-    elif speed < 0:
-        actual_left_speed = -speed
-    else:
-        actual_left_speed = 0
-        actual_right_speed = 0
-        
-    if stop_override == 0 and actual_left_speed == 0 and actual_right_speed == 0:
-        actual_stop_state = STOP_SIGNAL
+def send_car_command(speed, steering_angle, stop_override=0, dry_run=None):
+    """Send one ``L:,R:,B:,S:`` datagram to the ERC car.
 
-    actual_left_speed = max(0, min(MAX_SPEED, actual_left_speed))
-    actual_right_speed = max(0, min(MAX_SPEED, actual_right_speed))
-    actual_servo_angle = max(SERVO_LEFT_MAX, min(SERVO_RIGHT_MAX, steering_angle))
-
-    command_str = f"L:{actual_left_speed},R:{actual_right_speed},B:{actual_stop_state},S:{actual_servo_angle}\n"
-    
-    try:
-        sock.sendto(command_str.encode(), (UDP_IP, UDP_PORT))
-        if DEBUG_MODE:
-            print(f"Sent: {command_str.strip()}")
-    except Exception as e:
-        print(f"UDP Send Error: {e}")
+    ``dry_run`` None follows ``LOG_ONLY`` (env ``ERC_LOG_ONLY`` or the UI
+    checkbox). True logs the datagram and does not touch the socket.
+    The formatted string is always returned. AI intents go through
+    ``CommandGateway``, which calls this; block programs call it directly.
+    """
+    command_str = format_car_command(
+        speed,
+        steering_angle,
+        stop_override,
+        max_speed=MAX_SPEED,
+        servo_min=SERVO_LEFT_MAX,
+        servo_max=SERVO_RIGHT_MAX,
+        stop_signal=STOP_SIGNAL,
+    )
+    use_dry_run = LOG_ONLY if dry_run is None else bool(dry_run)
+    with _udp_lock:
+        if use_dry_run:
+            print(f"[log-only] {command_str.strip()}")
+            return command_str
+        try:
+            sock.sendto(command_str.encode(), (UDP_IP, UDP_PORT))
+            if DEBUG_MODE:
+                print(f"Sent: {command_str.strip()}")
+        except Exception as e:
+            print(f"UDP Send Error: {e}")
+    return command_str
 
 def block_move_forward(duration_s=1, log_callback=None):
     if log_callback:
@@ -587,7 +599,7 @@ class MainWindow(QMainWindow):
         
     def init_ui(self):
         self.setWindowTitle("🏎️ ERC Racing Car - Block Programming")
-        self.setGeometry(100, 100, 1400, 900)
+        self.setGeometry(100, 100, 1400, 980)
         
         # Set racing theme background with checkered pattern effect
         self.setStyleSheet("""
@@ -820,8 +832,9 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(log_toggle)
         
         program_container_layout.addLayout(button_layout)
-        
-        # Log area (hidden by default) - Racing theme
+
+        # Log area (hidden by default) - Racing theme. Created before the AI
+        # panel so gateway messages can use self.log.
         self.log_text = QTextEdit()
         self.log_text.setMaximumHeight(150)
         self.log_text.setStyleSheet("""
@@ -833,6 +846,8 @@ class MainWindow(QMainWindow):
             color: #8B0000;
         """)
         self.log_text.hide()
+        self._build_ai_panel()
+        program_container_layout.addWidget(self.ai_panel)
         program_container_layout.addWidget(self.log_text)
         
         splitter.addWidget(program_container)
@@ -843,6 +858,10 @@ class MainWindow(QMainWindow):
         self.log("🏎️ ERC Racing Car Controller Initialized! 🏎️")
         self.log("UDP commands to {}:{}".format(UDP_IP, UDP_PORT))
         self.log("🏁 Drag blocks from the palette to build your racing program! 🏁")
+        if LOG_ONLY:
+            self.log("Dry run: ERC_LOG_ONLY is set. Datagrams are logged and not sent.")
+        self.log("Level 1 AI is off until Vision AI or Voice AI is enabled. E-stop and block programs override AI.")
+        self._ai_timer.start()
     
     def handle_drop(self, block_data, insert_index):
         """Handle block drop from palette."""
@@ -957,10 +976,15 @@ class MainWindow(QMainWindow):
         self.log("Program cleared.")
     
     def run_program(self):
-        """Run the program."""
+        """Run the program. Refuses while e-stop is latched."""
         if self.is_executing:
             return
-        
+        if self.gateway.estop_latched:
+            self.log("E-stop is latched. Press Clear e-stop before running the program.")
+            return
+
+        # Manual blocks own the wire until execute_program's finally.
+        self.gateway.set_manual_override(True)
         self.is_executing = True
         self.run_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -1007,7 +1031,9 @@ class MainWindow(QMainWindow):
         finally:
             self.log("--- Program Execution Finished ---")
             send_car_command(0, SERVO_STRAIGHT, STOP_SIGNAL)
+            self.gateway.acknowledge_external_stop()
             self.is_executing = False
+            self.gateway.set_manual_override(False)
             self.run_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             
@@ -1017,15 +1043,246 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
     
     def stop_program(self):
-        """Stop program execution."""
+        """Stop program execution and latch e-stop so AI cannot resume."""
         self.is_executing = False
-        self.log("Stopping program...")
-        send_car_command(0, SERVO_STRAIGHT, STOP_SIGNAL)
-    
+        self.log("Stopping program (e-stop).")
+        self.gateway.emergency_stop("ui")
+        self._refresh_ai_status()
+
+    def _build_ai_panel(self):
+        """Vision / voice toggles. Block buttons above this panel are unchanged."""
+        self.gateway = CommandGateway(
+            send_car_command,
+            forward_speed=FORWARD_SPEED,
+            turn_speed=int(FORWARD_SPEED * TURN_SPEED_FACTOR),
+            servo_straight=SERVO_STRAIGHT,
+            servo_left=SERVO_LEFT_MAX,
+            servo_right=SERVO_RIGHT_MAX,
+            stop_signal=STOP_SIGNAL,
+            stall_timeout_s=stall_timeout_from_env(),
+            log=self.log,
+        )
+        self.vision = VisionLevel1(camera_index=camera_index_from_env())
+        self.voice = VoiceLevel1()
+        self._vision_seen_ts = None
+
+        self.ai_panel = QFrame()
+        self.ai_panel.setObjectName("aiPanel")
+        self.ai_panel.setStyleSheet(
+            "QFrame#aiPanel { background-color: #FFF8DC; border: 3px solid #8B0000; border-radius: 8px; }"
+        )
+        panel_layout = QVBoxLayout(self.ai_panel)
+        panel_layout.setContentsMargins(10, 8, 10, 8)
+        panel_layout.setSpacing(6)
+
+        title = QLabel("Level 1 AI  —  vision and voice share L/R/B/S. Manual blocks and E-STOP win.")
+        title.setStyleSheet(self._ai_label_style())
+        title.setWordWrap(True)
+        panel_layout.addWidget(title)
+
+        toggles = QHBoxLayout()
+        self.vision_button = QPushButton("Vision AI: OFF")
+        self.vision_button.setCheckable(True)
+        self.vision_button.toggled.connect(self._toggle_vision)
+        toggles.addWidget(self.vision_button)
+
+        self.voice_button = QPushButton("Voice AI: OFF")
+        self.voice_button.setCheckable(True)
+        self.voice_button.toggled.connect(self._toggle_voice)
+        toggles.addWidget(self.voice_button)
+
+        self.dry_run_box = QCheckBox("Dry run (log only, no UDP)")
+        self.dry_run_box.setChecked(LOG_ONLY)
+        self.dry_run_box.setStyleSheet(self._ai_label_style())
+        self.dry_run_box.toggled.connect(self._toggle_dry_run)
+        toggles.addWidget(self.dry_run_box)
+        toggles.addStretch()
+        panel_layout.addLayout(toggles)
+        self._style_ai_toggle(self.vision_button, False)
+        self._style_ai_toggle(self.voice_button, False)
+
+        sim_row = QHBoxLayout()
+        sim_label = QLabel("Vision input:")
+        sim_label.setStyleSheet(self._ai_label_style())
+        sim_row.addWidget(sim_label)
+        self.sim_combo = QComboBox()
+        self.sim_combo.addItem("Camera", "camera")
+        self.sim_combo.addItem("Simulate green (forward)", "green")
+        self.sim_combo.addItem("Simulate red (stop)", "red")
+        self.sim_combo.addItem("Simulate blue (left)", "blue")
+        self.sim_combo.addItem("Simulate yellow (right)", "yellow")
+        self.sim_combo.addItem("Simulate none", "none")
+        self.sim_combo.currentIndexChanged.connect(self._on_sim_changed)
+        sim_row.addWidget(self.sim_combo)
+        sim_row.addStretch()
+        panel_layout.addLayout(sim_row)
+
+        voice_row = QHBoxLayout()
+        self.voice_entry = QLineEdit()
+        self.voice_entry.setPlaceholderText('Voice text: forward, stop, left, right, emergency stop')
+        self.voice_entry.returnPressed.connect(self._submit_voice)
+        voice_row.addWidget(self.voice_entry)
+        send_voice = QPushButton("Send voice")
+        send_voice.clicked.connect(self._submit_voice)
+        voice_row.addWidget(send_voice)
+        mic_once = QPushButton("Mic once")
+        mic_once.clicked.connect(self._mic_once)
+        voice_row.addWidget(mic_once)
+        panel_layout.addLayout(voice_row)
+
+        self.ai_detect_label = QLabel("Last label: —    Last intent: —")
+        self.ai_detect_label.setStyleSheet(self._ai_label_style())
+        self.ai_detect_label.setWordWrap(True)
+        panel_layout.addWidget(self.ai_detect_label)
+
+        self.ai_command_label = QLabel("Last command: —")
+        self.ai_command_label.setStyleSheet(
+            "color: #8B0000; background-color: #FFF8DC; "
+            "font-family: 'Courier New', monospace; font-size: 13px; font-weight: bold;"
+        )
+        self.ai_command_label.setWordWrap(True)
+        panel_layout.addWidget(self.ai_command_label)
+
+        self.ai_safety_label = QLabel("Safety: AI off")
+        self.ai_safety_label.setStyleSheet(self._ai_label_style())
+        self.ai_safety_label.setWordWrap(True)
+        panel_layout.addWidget(self.ai_safety_label)
+
+        estop_row = QHBoxLayout()
+        estop_button = QPushButton("E-STOP")
+        estop_button.setStyleSheet(
+            "background: #8B0000; color: white; font-weight: bold; padding: 8px 18px; border-radius: 6px;"
+        )
+        estop_button.clicked.connect(self.stop_program)
+        estop_row.addWidget(estop_button)
+        clear_estop = QPushButton("Clear e-stop")
+        clear_estop.setStyleSheet(
+            "background: #FFF8DC; color: #1a1a1a; font-weight: bold; padding: 8px 18px; "
+            "border: 2px solid #8B0000; border-radius: 6px;"
+        )
+        clear_estop.clicked.connect(self._clear_estop)
+        estop_row.addWidget(clear_estop)
+        estop_row.addStretch()
+        panel_layout.addLayout(estop_row)
+
+        self._ai_timer = QTimer(self)
+        self._ai_timer.setInterval(100)
+        self._ai_timer.timeout.connect(self._on_ai_tick)
+
+    def _ai_label_style(self):
+        return (
+            "color: #1a1a1a; background-color: #FFF8DC; font-weight: bold; font-size: 13px;"
+        )
+
+    def _style_ai_toggle(self, button, on):
+        if on:
+            button.setStyleSheet(
+                "background: #228B22; color: white; font-weight: bold; padding: 8px 14px; border-radius: 6px;"
+            )
+        else:
+            button.setStyleSheet(
+                "background: #EEE8AA; color: #1a1a1a; font-weight: bold; padding: 8px 14px; "
+                "border: 2px solid #8B0000; border-radius: 6px;"
+            )
+
+    def _toggle_dry_run(self, checked):
+        global LOG_ONLY
+        LOG_ONLY = bool(checked)
+        if checked:
+            self.log("Dry run ON — L/R/B/S is logged, UDP is not sent.")
+        else:
+            self.log("Dry run OFF — commands are sent to {}:{}.".format(UDP_IP, UDP_PORT))
+
+    def _toggle_vision(self, checked):
+        self.vision_button.setText("Vision AI: ON" if checked else "Vision AI: OFF")
+        self._style_ai_toggle(self.vision_button, checked)
+        self.vision.set_mode(self.sim_combo.currentData())
+        if checked:
+            self._vision_seen_ts = None
+            self.vision.start()
+        else:
+            self.vision.stop()
+        self.gateway.set_source_enabled("vision", checked)
+        self._refresh_ai_status()
+
+    def _toggle_voice(self, checked):
+        self.voice_button.setText("Voice AI: ON" if checked else "Voice AI: OFF")
+        self._style_ai_toggle(self.voice_button, checked)
+        self.gateway.set_source_enabled("voice", checked)
+        self._refresh_ai_status()
+
+    def _on_sim_changed(self, _index):
+        mode = self.sim_combo.currentData()
+        self.vision.set_mode(mode if mode else "camera")
+
+    def _submit_voice(self):
+        text = self.voice_entry.text().strip()
+        if not text:
+            return
+        intent = self.voice.transcript_to_intent(text)
+        if intent is None:
+            self.log(f"No Level 1 intent in {text!r}. Try forward, stop, left, right, emergency stop.")
+            self.gateway.last_label = text
+            self.gateway.last_intent = "—"
+            self._refresh_ai_status()
+            return
+        self.gateway.submit_intent(intent, source="voice", label=text)
+        self._refresh_ai_status()
+
+    def _mic_once(self):
+        text = self.voice.listen_once()
+        if not text:
+            backend = self.voice.backend_name or "none"
+            self.log(
+                f"Mic once: ASR is not capturing (backend={backend}). "
+                "Type a command and press Send voice. TODO(C3): speech_recognition or Vosk."
+            )
+            return
+        self.voice_entry.setText(text)
+        self._submit_voice()
+
+    def _clear_estop(self):
+        self.gateway.clear_estop()
+        self._refresh_ai_status()
+
+    def _on_ai_tick(self):
+        try:
+            if self.vision_button.isChecked():
+                ts, label, intent = self.vision.latest()
+                if ts is not None and ts != self._vision_seen_ts:
+                    self._vision_seen_ts = ts
+                    shown = label if label else "none"
+                    if intent:
+                        self.gateway.submit_intent(intent, source="vision", label=shown)
+                    else:
+                        self.gateway.heartbeat("vision", label=shown)
+            self.gateway.tick()
+            self._refresh_ai_status()
+        except Exception as exc:
+            self.log(f"AI tick error: {exc}")
+
+    def _refresh_ai_status(self):
+        gateway = self.gateway
+        self.ai_detect_label.setText(
+            f"Last label: {gateway.last_label}    Last intent: {gateway.last_intent}"
+        )
+        self.ai_command_label.setText(f"Last command: {gateway.last_command}")
+        source = self.vision.status_message if self.vision_button.isChecked() else "off"
+        self.ai_safety_label.setText(
+            f"Safety: {gateway.safety_status()}    Vision source: {source}"
+        )
+
     def closeEvent(self, event):
-        """Handle window close."""
+        """Handle window close. Brake wins over any in-flight AI intent."""
         self.is_executing = False
-        send_car_command(0, SERVO_STRAIGHT, STOP_SIGNAL)
+        if hasattr(self, "_ai_timer"):
+            self._ai_timer.stop()
+        if hasattr(self, "vision"):
+            self.vision.stop()
+        if hasattr(self, "gateway"):
+            self.gateway.emergency_stop("close")
+        else:
+            send_car_command(0, SERVO_STRAIGHT, STOP_SIGNAL)
         if sock:
             sock.close()
         event.accept()
