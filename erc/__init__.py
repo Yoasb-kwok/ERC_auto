@@ -13,6 +13,11 @@ Start here. You do not build UDP strings. See ``docs/STUDENT_SDK.md``.
     @erc.on_voice("stop")
     def heard_stop(phrase):
         erc.stop()
+
+School models (no training loop in this SDK)::
+
+    erc.load_model("erc-signs.onnx")
+    erc.on_detect("stop_sign", "stop")
 """
 
 from __future__ import annotations
@@ -26,14 +31,17 @@ __all__ = [
     "get_default_car",
     "hear",
     "last_command",
+    "load_model",
     "move_forward",
     "on_color",
+    "on_detect",
     "on_voice",
     "reset_default_car",
     "run",
     "session",
     "set_manual_override",
     "simulate_color",
+    "simulate_detect",
     "stop",
     "turn_left",
     "turn_right",
@@ -90,6 +98,48 @@ def on_color(color, handler=None):
             return get_default_car().on_color(color, fn)
         return decorate
     return get_default_car().on_color(color, handler)
+
+
+def load_model(
+    source=None,
+    *,
+    model_id=None,
+    workflow=None,
+    workspace=None,
+    confidence=0.5,
+    api_key=None,
+    api_url=None,
+):
+    """Load ONNX, YOLO weights, or a Roboflow model id. Inference only."""
+    return get_default_car().load_model(
+        source,
+        model_id=model_id,
+        workflow=workflow,
+        workspace=workspace,
+        confidence=confidence,
+        api_key=api_key,
+        api_url=api_url,
+    )
+
+
+def on_detect(class_name, handler=None, *, confidence=None):
+    """Run ``handler`` or a motion name when that class is detected.
+
+    ``erc.on_detect("stop_sign", "stop")`` or a decorator. See
+    ``docs/STUDENT_SDK.md``.
+    """
+    if handler is None:
+        def decorate(fn):
+            return get_default_car().on_detect(class_name, fn, confidence=confidence)
+        return decorate
+    return get_default_car().on_detect(class_name, handler, confidence=confidence)
+
+
+def simulate_detect(label, confidence=1.0, *, detections=None):
+    """Pretend the model saw ``label``. No weights and no network required."""
+    return get_default_car().simulate_detect(
+        label, confidence=confidence, detections=detections
+    )
 
 
 def on_voice(phrase, handler=None):

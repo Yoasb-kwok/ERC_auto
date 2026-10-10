@@ -29,6 +29,10 @@ Use [docs/STUDENT_SDK.md](docs/STUDENT_SDK.md) in class. The page behind the
 SDK (intent table, e-stop, stall timer, block window) is
 [docs/AI_MVP_L1.md](docs/AI_MVP_L1.md).
 
+School C2 trains in Roboflow, then calls `erc.load_model` and `erc.on_detect`.
+Students do not write a training loop. Optional detect packages live in
+`requirements-detect.txt` and are not imported by `import erc`.
+
 ## Advanced: the datagram
 
 Only read this if you are changing the PC sender or the firmware. Level 1

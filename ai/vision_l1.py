@@ -160,6 +160,8 @@ class VisionLevel1:
         self._stabilizer = LabelStabilizer(confirm_frames)
         self._mode = "camera"
         self._latest = (None, None, None)  # monotonic ts, label, intent
+        # Camera frame for a loaded detector. Independent of the color label.
+        self._frame_packet = (None, None)  # monotonic ts, frame or None
         self.status_message = "stopped"
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -181,6 +183,15 @@ class VisionLevel1:
         """``(timestamp_or_None, label_or_None, intent_or_None)``."""
         with self._lock:
             return self._latest
+
+    def latest_frame(self):
+        """``(timestamp_or_None, frame_or_None)`` from the last camera read.
+
+        Simulated color modes have no frame. The timestamp updates as soon as
+        a frame is read, including while the color label is still warming up.
+        """
+        with self._lock:
+            return self._frame_packet
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -210,12 +221,14 @@ class VisionLevel1:
                 if mode != "camera" and cap is not None:
                     cap.release()
                     cap = None
-                raw_label, status, cap = self._sample(mode, cap)
+                raw_label, status, cap, frame = self._sample(mode, cap)
                 with self._lock:
                     if self._mode != mode:
                         # Drop a frame sampled just as the operator switched mode.
                         pass
                     else:
+                        if frame is not None:
+                            self._frame_packet = (time.monotonic(), frame)
                         stable = self._stabilizer.push(raw_label)
                         if not self._stabilizer.ready:
                             # Warmup is not a "none" sample, so it cannot clear e-stop re-arm.
@@ -231,18 +244,18 @@ class VisionLevel1:
 
     def _sample(self, mode: str, cap):
         if mode == "none":
-            return None, "simulated: none", cap
+            return None, "simulated: none", cap, None
         if mode in COLOR_LABELS:
-            return mode, f"simulated: {mode}", cap
+            return mode, f"simulated: {mode}", cap, None
         if cv2 is None:
-            return None, "placeholder: install opencv-python (see README)", cap
+            return None, "placeholder: install opencv-python (see README)", cap, None
         if cap is None:
             cap = cv2.VideoCapture(self.camera_index)
             if not cap.isOpened():
                 cap.release()
-                return None, f"placeholder: camera {self.camera_index} did not open", None
+                return None, f"placeholder: camera {self.camera_index} did not open", None, None
         ok, frame = cap.read()
         if not ok:
-            return None, f"camera {self.camera_index} read failed", cap
+            return None, f"camera {self.camera_index} read failed", cap, None
         label = classify_frame_bgr(frame)
-        return label, f"camera {self.camera_index}", cap
+        return label, f"camera {self.camera_index}", cap, frame

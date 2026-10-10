@@ -193,6 +193,11 @@ Useful env vars:
 | `ERC_AI_STALL_S` | `1.0` | Seconds without a refreshed motion intent before brake |
 | `ERC_CAMERA_INDEX` | `0` | OpenCV camera index |
 
+School classes that train a detector do that in Roboflow (or export ONNX /
+YOLO weights). The SDK only runs inference: `erc.load_model` and
+`erc.on_detect`. See [STUDENT_SDK.md](STUDENT_SDK.md). There is no training
+loop in this repo. Level 1 `on_color` / `on_voice` stays the zero-ML path.
+
 ## Level 2 roadmap
 
 - Replace the full-frame color vote with the largest contour. Drive `S`

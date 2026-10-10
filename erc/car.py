@@ -1,4 +1,4 @@
-"""One car object. Motion, color events, and voice events share the gateway."""
+"""One car object. Motion, color, voice, and detections share the gateway."""
 
 from __future__ import annotations
 
@@ -98,6 +98,12 @@ class Car:
         self.voice = VoiceLevel1()
         self._color_handlers: dict[str, list] = {}
         self._voice_handlers: dict[str, list] = {}
+        self._detect_handlers: dict[str, list] = {}
+        self._model = None
+        self._detect_confidence = 0.5
+        self._active_classes: set[str] = set()
+        self._seen_frame = None
+        self._predict_error_logged = False
         self.level2_rules: list[dict] = []
         self._last_color = None
         self._handler_lock = threading.Lock()
@@ -140,6 +146,88 @@ class Car:
         with self._handler_lock:
             self._color_handlers.setdefault(name, []).append(handler)
         return handler
+
+    def load_model(
+        self,
+        source=None,
+        *,
+        model_id=None,
+        workflow=None,
+        workspace=None,
+        confidence: float = 0.5,
+        api_key=None,
+        api_url=None,
+    ):
+        """Load an inference model. Does not train.
+
+        A path ending in ``.onnx`` or ``.pt`` / ``.pth`` reads a local file.
+        ``model_id=`` or ``workflow=`` selects a hosted Roboflow model. The
+        API key is ``api_key`` or the ``ROBOFLOW_API_KEY`` environment
+        variable, never a literal in this SDK. A missing key logs a warning
+        and still returns the detector so ``simulate_detect`` can run.
+        """
+        from erc.detect import RoboflowDetector, build_model
+
+        detector = build_model(
+            source,
+            model_id=model_id,
+            workflow=workflow,
+            workspace=workspace,
+            confidence=confidence,
+            api_key=api_key,
+            api_url=api_url,
+        )
+        self._model = detector
+        self._detect_confidence = float(confidence)
+        self._predict_error_logged = False
+        if isinstance(detector, RoboflowDetector) and not detector.api_key:
+            self._log(
+                "ROBOFLOW_API_KEY is not set. Hosted infer will fail until you "
+                "set it in the environment (never in the script). "
+                "simulate_detect still works."
+            )
+        return detector
+
+    def on_detect(self, class_name, handler_or_intent=None, *, confidence=None):
+        """Fire when ``class_name`` is seen at or above ``confidence``.
+
+        ``handler_or_intent`` is a callable ``(label, confidence)`` or a
+        motion name: ``stop``, ``move_forward``, ``turn_left``, ``turn_right``,
+        ``estop`` (and the same words ``resolve_intent`` already knows, such
+        as ``停止``). Omit the handler to use this as a decorator.
+
+        The same class does not fire again until a later frame omits it or
+        drops below every handler threshold. Mapped motions still go through
+        the gateway, so e-stop and manual override win.
+        """
+        if handler_or_intent is None:
+            def decorate(fn):
+                self.on_detect(class_name, fn, confidence=confidence)
+                return fn
+
+            return decorate
+        from erc.detect import canonical_class
+
+        label = canonical_class(class_name)
+        if not label:
+            raise ValueError("on_detect needs a class name")
+        threshold = self._detect_confidence if confidence is None else float(confidence)
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
+        action = self._bind_detect_action(handler_or_intent)
+        with self._handler_lock:
+            self._detect_handlers.setdefault(label, []).append((threshold, action))
+        return handler_or_intent
+
+    def simulate_detect(self, label, confidence: float = 1.0, *, detections=None):
+        """Inject one detection frame. No model and no network required."""
+        from erc.detect import Detection
+
+        if detections is None:
+            frame = [Detection(label=str(label), confidence=float(confidence))]
+        else:
+            frame = list(detections)
+        self._dispatch_detections(frame)
 
     def on_voice(self, phrase, handler):
         intent = resolve_intent(phrase)
@@ -263,6 +351,89 @@ class Car:
     def _drive(self, intent: str) -> bool:
         return self.gateway.submit_intent(intent, source="student", label=intent, operator=True)
 
+    def _bind_detect_action(self, handler_or_intent):
+        if callable(handler_or_intent):
+            return handler_or_intent
+        if not isinstance(handler_or_intent, str):
+            raise ValueError(
+                "on_detect handler must be a function or a motion name "
+                "such as stop or move_forward"
+            )
+        key = "_".join(handler_or_intent.strip().lower().replace("-", " ").split())
+        method_name = _DETECT_ACTIONS.get(key)
+        if method_name is None:
+            intent = resolve_intent(handler_or_intent)
+            if intent is None:
+                intent = resolve_intent(key.replace("_", " "))
+            method_name = _INTENT_TO_METHOD.get(intent) if intent else None
+        if method_name is None:
+            raise ValueError(
+                f"unknown detect action {handler_or_intent!r}. "
+                "Use stop, move_forward, turn_left, turn_right, estop, or a function."
+            )
+        return getattr(self, method_name)
+
+    def _dispatch_detections(self, detections) -> None:
+        from erc.detect import canonical_class
+
+        best: dict[str, tuple[str, float]] = {}
+        for item in detections:
+            raw_label = getattr(item, "label", None)
+            if raw_label is None and isinstance(item, dict):
+                raw_label = item.get("class") or item.get("label")
+            name = canonical_class(raw_label)
+            if not name:
+                continue
+            raw_conf = getattr(item, "confidence", None)
+            if raw_conf is None and isinstance(item, dict):
+                raw_conf = item.get("confidence", 0.0)
+            try:
+                conf = float(raw_conf)
+            except (TypeError, ValueError):
+                continue
+            previous = best.get(name)
+            if previous is None or conf > previous[1]:
+                best[name] = (str(raw_label), conf)
+        with self._handler_lock:
+            handlers = {
+                key: list(value) for key, value in self._detect_handlers.items()
+            }
+        fired = []
+        seen_now: set[str] = set()
+        for name, (raw_label, conf) in best.items():
+            matched = [
+                action
+                for threshold, action in handlers.get(name, ())
+                if conf >= threshold
+            ]
+            if not matched:
+                continue
+            seen_now.add(name)
+            if name in self._active_classes:
+                continue
+            for action in matched:
+                fired.append((action, raw_label, conf))
+        self._active_classes = seen_now
+        for action, raw_label, conf in fired:
+            invoke(action, raw_label, conf)
+
+    def _infer_latest_frame(self) -> None:
+        model = self._model
+        if model is None:
+            return
+        timestamp, frame = self.vision.latest_frame()
+        if frame is None or timestamp is None or timestamp == self._seen_frame:
+            return
+        self._seen_frame = timestamp
+        try:
+            detections = model.predict(frame)
+        except Exception as exc:
+            if not self._predict_error_logged:
+                self._predict_error_logged = True
+                self._log(f"detect predict failed: {exc}")
+            return
+        self._dispatch_detections(detections or [])
+
     def _on_color_sample(self, label) -> None:
         with self._handler_lock:
             if label == self._last_color:
@@ -279,8 +450,33 @@ class Car:
             if timestamp is not None and timestamp != seen:
                 seen = timestamp
                 self._on_color_sample(label)
+            self._infer_latest_frame()
             self.gateway.tick()
             self._stop_event.wait(0.1)
+
+
+# Motion names accepted by on_detect. Underscores are explicit because
+# resolve_intent turns them into spaces and would miss "move_forward".
+_DETECT_ACTIONS = {
+    "move_forward": "move_forward",
+    "forward": "move_forward",
+    "go": "move_forward",
+    "stop": "stop",
+    "turn_left": "turn_left",
+    "left": "turn_left",
+    "turn_right": "turn_right",
+    "right": "turn_right",
+    "estop": "estop",
+    "emergency_stop": "estop",
+}
+
+_INTENT_TO_METHOD = {
+    "forward": "move_forward",
+    "stop": "stop",
+    "left": "turn_left",
+    "right": "turn_right",
+    "estop": "estop",
+}
 
 
 def get_default_car() -> Car:

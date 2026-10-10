@@ -1,0 +1,9 @@
+# Optional detectors. Not imported by `import erc` or `import erc.detect`.
+# Install when a school model should run on this computer:
+#   python3 -m pip install -r requirements-detect.txt
+# onnxruntime: local .onnx (load_model("erc-signs.onnx"))
+# ultralytics: local YOLO .pt / .pth (load_model("best.pt"))
+# inference-sdk: hosted Roboflow model id or workflow (ROBOFLOW_API_KEY)
+onnxruntime>=1.16
+ultralytics>=8.0
+inference-sdk>=0.9
