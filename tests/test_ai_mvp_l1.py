@@ -284,8 +284,10 @@ class GatewayTests(unittest.TestCase):
 class ControllerSourceTests(unittest.TestCase):
     def test_pyqt_app_wires_the_gateway_and_keeps_the_servo_constant_order(self):
         text = (ROOT / "AutoERC_PyQt5.py").read_text()
-        self.assertLess(text.index("SERVO_STRAIGHT = 90"), text.index("current_steering_angle = SERVO_STRAIGHT"))
-        self.assertIn("format_car_command(", text)
+        transport = (ROOT / "ai" / "transport.py").read_text()
+        self.assertLess(text.index("from ai.transport import"), text.index("current_steering_angle = SERVO_STRAIGHT"))
+        self.assertIn("SERVO_STRAIGHT = 90", transport)
+        self.assertIn("format_car_command(", transport)
         self.assertIn("forward_speed=FORWARD_SPEED", text)
         self.assertIn("turn_speed=int(FORWARD_SPEED * TURN_SPEED_FACTOR)", text)
         self.assertIn("stop_signal=STOP_SIGNAL", text)

@@ -176,11 +176,21 @@ class CommandGateway:
         if source == "vision" and resolve_intent(label) not in MOTION_INTENTS:
             self.vision_rearm = False
 
-    def submit_intent(self, intent, source: str = "ai", label: str | None = None) -> bool:
+    def submit_intent(
+        self,
+        intent,
+        source: str = "ai",
+        label: str | None = None,
+        *,
+        operator: bool = False,
+    ) -> bool:
         """Accept a canonical intent or any shared-table label (``green``).
 
         Returns True only when the intent was allowed onto the sender.
         E-stop is accepted even if that source's toggle is off.
+
+        ``operator=True`` is a direct student/button command. It skips the
+        vision/voice toggle, and e-stop plus manual override still win.
         """
         if label is not None:
             self.last_label = str(label)
@@ -198,7 +208,7 @@ class CommandGateway:
         if self.manual_override:
             self._log(f"ignored {resolved} from {source}: manual/UI override")
             return False
-        if not self.sources_enabled.get(source, False):
+        if not operator and not self.sources_enabled.get(source, False):
             self._log(f"ignored {resolved} from {source}: {source} AI is off")
             return False
         if source == "vision" and self.vision_rearm and resolved in MOTION_INTENTS:

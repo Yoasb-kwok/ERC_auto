@@ -1,8 +1,14 @@
 # ERC Level 1 AI (PC skeleton)
 
+Students should start with [STUDENT_SDK.md](STUDENT_SDK.md) (`import erc`).
+This page is the layer under that SDK: the intent table, the gateway, and
+the block-programming window. The wire format is an advanced note at the
+bottom, not the class exercise.
+
 Course demo: one vision command and one voice command both drive the car
 through the UDP path that already exists. Emergency stop and the block
-program win over those commands.
+program win over those commands. The student SDK uses the same gateway, so
+`erc.estop()` and manual override follow the rules below.
 
 The ESP8266 sketch is unchanged. If the AI loop on the computer stops
 refreshing a motion command, the **PC** sends brake. The firmware still

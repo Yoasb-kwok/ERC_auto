@@ -41,6 +41,17 @@ INTENT_TABLE = {
     "right": INTENT_RIGHT,
     "estop": INTENT_ESTOP,
     "emergency": INTENT_ESTOP,
+    # Student-SDK aliases. Traditional and simplified both count.
+    "前進": INTENT_FORWARD,
+    "前进": INTENT_FORWARD,
+    "停": INTENT_STOP,
+    "停止": INTENT_STOP,
+    "左轉": INTENT_LEFT,
+    "左转": INTENT_LEFT,
+    "右轉": INTENT_RIGHT,
+    "右转": INTENT_RIGHT,
+    "緊急停止": INTENT_ESTOP,
+    "紧急停止": INTENT_ESTOP,
 }
 
 # Longer phrases checked before shorter ones inside a sentence.

@@ -11,76 +11,59 @@ from PyQt5.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal, QObject, QMimeDa
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont, QPainterPath, QDrag
 
 from ai.command_gateway import CommandGateway, stall_timeout_from_env
+from ai.transport import (
+    BACKWARD_SPEED,
+    FORWARD_SPEED,
+    MAX_SPEED,
+    SERVO_LEFT_MAX,
+    SERVO_RIGHT_MAX,
+    SERVO_STRAIGHT,
+    STOP_SIGNAL,
+    TURN_SPEED_FACTOR,
+    UDP_IP,
+    UDP_PORT,
+    close_socket,
+    ensure_socket,
+    send_car_command as transmit_car_command,
+)
 from ai.vision_l1 import VisionLevel1, camera_index_from_env
 from ai.voice_l1 import VoiceLevel1
-from ai.wire import format_car_command
 
 # --- Global Configuration ---
 CYCLE_TIME = 0.1
 DEBUG_MODE = False
 
-# --- Car Control Constants ---
-FORWARD_SPEED = 100
-BACKWARD_SPEED = 100
-TURN_SPEED_FACTOR = 0.5
-MAX_SPEED = 190
-
-SERVO_STRAIGHT = 90
-SERVO_LEFT_MAX = 50
-SERVO_RIGHT_MAX = 130
-
-STOP_SIGNAL = 1
-
-# Track the steering state globally. Must follow SERVO_STRAIGHT.
+# Track the steering state globally. SERVO_STRAIGHT comes from ai.transport.
 current_steering_angle = SERVO_STRAIGHT
 
 # ERC_LOG_ONLY=1 (or the UI dry-run box) prints L/R/B/S and does not transmit.
 LOG_ONLY = os.environ.get("ERC_LOG_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}
 
-# --- UDP Communication Settings ---
-UDP_IP = "192.168.4.1"
-UDP_PORT = 4210
-
-sock = None
 try:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(0.1)
+    ensure_socket()
 except socket.error as e:
     print(f"Failed to create socket: {e}")
     sys.exit(1)
 
 # --- Block Functions ---
-_udp_lock = threading.Lock()
 
 def send_car_command(speed, steering_angle, stop_override=0, dry_run=None):
     """Send one ``L:,R:,B:,S:`` datagram to the ERC car.
 
     ``dry_run`` None follows ``LOG_ONLY`` (env ``ERC_LOG_ONLY`` or the UI
     checkbox). True logs the datagram and does not touch the socket.
-    The formatted string is always returned. AI intents go through
-    ``CommandGateway``, which calls this; block programs call it directly.
+    The student SDK calls ``ai.transport.send_car_command`` directly so it
+    does not import this Qt module. Block programs keep calling this wrapper.
     """
-    command_str = format_car_command(
+    if dry_run is None:
+        dry_run = LOG_ONLY
+    return transmit_car_command(
         speed,
         steering_angle,
         stop_override,
-        max_speed=MAX_SPEED,
-        servo_min=SERVO_LEFT_MAX,
-        servo_max=SERVO_RIGHT_MAX,
-        stop_signal=STOP_SIGNAL,
+        dry_run=dry_run,
+        debug=DEBUG_MODE,
     )
-    use_dry_run = LOG_ONLY if dry_run is None else bool(dry_run)
-    with _udp_lock:
-        if use_dry_run:
-            print(f"[log-only] {command_str.strip()}")
-            return command_str
-        try:
-            sock.sendto(command_str.encode(), (UDP_IP, UDP_PORT))
-            if DEBUG_MODE:
-                print(f"Sent: {command_str.strip()}")
-        except Exception as e:
-            print(f"UDP Send Error: {e}")
-    return command_str
 
 def block_move_forward(duration_s=1, log_callback=None):
     if log_callback:
@@ -1283,8 +1266,7 @@ class MainWindow(QMainWindow):
             self.gateway.emergency_stop("close")
         else:
             send_car_command(0, SERVO_STRAIGHT, STOP_SIGNAL)
-        if sock:
-            sock.close()
+        close_socket()
         event.accept()
 
 
