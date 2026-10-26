@@ -33,6 +33,25 @@ School C2 trains in Roboflow, then calls `erc.load_model` and `erc.on_detect`.
 Students do not write a training loop. Optional detect packages live in
 `requirements-detect.txt` and are not imported by `import erc`.
 
+## Boss demo1 (soft)
+
+One window, no camera, no change to `8266.ino`. Coins and power-ups stay on
+the PC. The soft gateway rewrites the outgoing `L/R/B/S` line, then uses the
+same sender as the block UI. If `ERC_LOG_ONLY` is unset, the demo sets it to
+`1` and only prints datagrams.
+
+```bash
+python3 -m pip install -r requirements-ai.txt
+ERC_LOG_ONLY=1 python3 examples/demo1_mario_soft.py
+```
+
+Arrows or WASD drive the virtual car. Space, a click on a coin, or
+`simulate_detect("coin")` scores +1. Keys `1`–`4` are Boost (`R × 1.5`, cap
+255, 2s), Slow (`R × 0.4`, 2s), Freeze (`B:1`, 1.5s), and steer bias
+(`S + 30`, 2s). The oil patch is Slow. Esc or **E-STOP** cancels power-ups;
+**Clear e-stop** does not restore them. The HUD shows score, remaining coins,
+the current power-up and countdown, e-stop, and the UDP log-only switch.
+
 ## Advanced: the datagram
 
 Only read this if you are changing the PC sender or the firmware. Level 1
