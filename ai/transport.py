@@ -52,21 +52,17 @@ def close_socket() -> None:
             _sock = None
 
 
-def send_car_command(speed, steering_angle, stop_override=0, dry_run=None, debug=False):
-    """Format and send one car datagram. Returns the string including newline.
+def transmit_datagram(command_str, dry_run=None, debug=False):
+    """Send one already-formatted ``L:,R:,B:,S:`` datagram.
 
-    ``dry_run`` None follows ``ERC_LOG_ONLY``. True skips the socket.
+    ``send_car_command`` formats and then calls this. The demo1 soft gateway
+    rewrites the line first, then uses the same socket (or the same log-only
+    print). ``dry_run`` None follows ``ERC_LOG_ONLY``. True skips the socket.
+    Returns the string including the trailing newline.
     """
     global _sock
-    command_str = format_car_command(
-        speed,
-        steering_angle,
-        stop_override,
-        max_speed=MAX_SPEED,
-        servo_min=SERVO_LEFT_MAX,
-        servo_max=SERVO_RIGHT_MAX,
-        stop_signal=STOP_SIGNAL,
-    )
+    if not str(command_str).endswith("\n"):
+        command_str = f"{command_str}\n"
     use_dry_run = log_only_from_env() if dry_run is None else bool(dry_run)
     with _lock:
         if use_dry_run:
@@ -82,3 +78,20 @@ def send_car_command(speed, steering_angle, stop_override=0, dry_run=None, debug
         except Exception as exc:
             print(f"UDP Send Error: {exc}")
     return command_str
+
+
+def send_car_command(speed, steering_angle, stop_override=0, dry_run=None, debug=False):
+    """Format and send one car datagram. Returns the string including newline.
+
+    ``dry_run`` None follows ``ERC_LOG_ONLY``. True skips the socket.
+    """
+    command_str = format_car_command(
+        speed,
+        steering_angle,
+        stop_override,
+        max_speed=MAX_SPEED,
+        servo_min=SERVO_LEFT_MAX,
+        servo_max=SERVO_RIGHT_MAX,
+        stop_signal=STOP_SIGNAL,
+    )
+    return transmit_datagram(command_str, dry_run=dry_run, debug=debug)
